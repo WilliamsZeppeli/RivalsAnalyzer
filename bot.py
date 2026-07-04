@@ -9,13 +9,12 @@ Comandos:
 
 Configura las variables de entorno en un archivo .env (ver .env.example):
   DISCORD_BOT_TOKEN
-  MARVEL_RIVALS_API_KEY
   GEMINI_API_KEY
 
-Nota sobre nombres de usuario: la propia documentación de MarvelRivalsAPI.com
-advierte que buscar stats/historial directamente por username no siempre es
-confiable. Por eso este bot primero resuelve el nombre a un UID con el
-endpoint find-player, y usa ese UID para todo lo demás.
+Fuente de datos: mrapi.org (API no oficial de Marvel Rivals, sin API key).
+Nota sobre nombres de usuario: buscar por username puede ser menos estable
+que por UID. Por eso este bot resuelve el nombre a un UID numérico primero
+(o usa el UID directo si se lo pasas), y usa ese UID para todo lo demás.
 """
 
 import os
@@ -83,6 +82,7 @@ async def link(interaction: discord.Interaction, usuario: str):
             raw_stats = await marvel_client.get_player_stats(usuario)
             name = (
                 raw_stats.get("name")
+                or raw_stats.get("player_name")
                 or raw_stats.get("player", {}).get("name")
                 or usuario
             )
@@ -189,7 +189,7 @@ async def partidas(interaction: discord.Interaction, usuario: str | None = None,
     cantidad = max(1, min(cantidad, 20))
 
     try:
-        raw_history = await marvel_client.get_match_history(uid, limit=cantidad)
+        raw_history = await marvel_client.get_match_history(uid, page=1)
     except MarvelRivalsAPIError as e:
         await interaction.followup.send(f"⚠️ {e}")
         return

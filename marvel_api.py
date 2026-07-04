@@ -1,14 +1,18 @@
 """
-Cliente sencillo para MarvelRivalsAPI.com
+Cliente sencillo para MRApi.org (por LunarAPI)
 
-Docs: https://docs.marvelrivalsapi.com/
-Necesitas una API key gratuita, generada en https://marvelrivalsapi.com/
+Docs: https://github.com/LunarAPI/api-docs
+No requiere API key para los endpoints públicos usados aquí.
+
+NOTA: Esta es una API no oficial hecha por la comunidad (igual que la
+anterior que usábamos, marvelrivalsapi.com). Si en algún momento deja de
+responder, revisa https://github.com/LunarAPI/api-docs o su Discord de
+soporte para ver si cambió de dominio/formato.
 """
 
-import os
 import aiohttp
 
-BASE_URL = "https://marvelrivalsapi.com/api"
+BASE_URL = "https://mrapi.org/api"
 
 
 class MarvelRivalsAPIError(Exception):
@@ -16,28 +20,17 @@ class MarvelRivalsAPIError(Exception):
 
 
 class MarvelRivalsClient:
-    def __init__(self, api_key: str | None = None):
-        self.api_key = api_key or os.getenv("MARVEL_RIVALS_API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "Falta MARVEL_RIVALS_API_KEY. Consigue una gratis en https://marvelrivalsapi.com/"
-            )
-
-    def _headers(self):
-        return {"x-api-key": self.api_key}
+    def __init__(self):
+        pass  # no hace falta API key con mrapi.org
 
     async def _get(self, path: str, params: dict | None = None):
         url = f"{BASE_URL}{path}"
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=self._headers(), params=params) as resp:
+            async with session.get(url, params=params) as resp:
                 if resp.status == 404:
                     raise MarvelRivalsAPIError(
                         "No encontré a ese jugador. Revisa que el nombre de usuario esté "
                         "escrito exactamente igual que en el juego (mayúsculas/minúsculas incluidas)."
-                    )
-                if resp.status == 401:
-                    raise MarvelRivalsAPIError(
-                        "La API key de Marvel Rivals no es válida o no está configurada."
                     )
                 if resp.status >= 400:
                     text = await resp.text()
@@ -46,29 +39,18 @@ class MarvelRivalsClient:
 
     async def find_player_uid(self, username: str) -> dict:
         """Busca el UID de un jugador a partir de su nombre de usuario."""
-        return await self._get(f"/v1/find-player/{username}")
+        data = await self._get(f"/player-id/{username}")
+        # Normalizamos para que siempre tengamos 'name' y 'uid', sin importar
+        # cómo se llamen exactamente los campos en la respuesta cruda.
+        uid = data.get("id") or data.get("uid") or data.get("player_uid")
+        if not uid:
+            raise MarvelRivalsAPIError("No encontré a ese jugador (respuesta sin UID).")
+        return {"name": data.get("name", username), "uid": str(uid)}
 
-    async def get_player_stats(self, uid_or_username: str, season: str | None = None) -> dict:
-        """Trae las estadísticas generales del jugador (rango, héroes, etc.)."""
-        params = {"season": season} if season else None
-        return await self._get(f"/v1/player/{uid_or_username}", params=params)
+    async def get_player_stats(self, uid: str) -> dict:
+        """Trae las estadísticas generales del jugador (rango, héroes, etc.) por UID."""
+        return await self._get(f"/player/{uid}")
 
-    async def get_match_history(
-        self,
-        uid_or_username: str,
-        season: str | None = None,
-        game_mode: str | None = None,
-        page: int = 1,
-        limit: int = 10,
-    ) -> dict:
-        """Trae el historial de partidas recientes del jugador."""
-        params = {"page": page, "limit": limit}
-        if season:
-            params["season"] = season
-        if game_mode:
-            params["game_mode"] = game_mode
-        return await self._get(f"/v2/player/{uid_or_username}/match-history", params=params)
-
-    async def get_match_details(self, match_uid: str) -> dict:
-        """Trae el detalle de una partida específica por su match_uid."""
-        return await self._get(f"/v1/match/{match_uid}")
+    async def get_match_history(self, uid: str, page: int = 1, **_ignored) -> dict:
+        """Trae el historial de partidas recientes del jugador por UID."""
+        return await self._get(f"/player-match/{uid}", params={"page": page})

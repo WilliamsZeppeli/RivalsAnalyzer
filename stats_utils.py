@@ -14,7 +14,10 @@ def summarize_player_stats(raw: dict) -> dict:
     summary = {}
 
     # Campos típicos de nivel/rango — se guardan tal cual si existen
-    for key in ("name", "level", "rank", "rank_score", "region", "season"):
+    for key in (
+        "name", "player_name", "level", "rank", "rank_score",
+        "region", "season", "player_uid",
+    ):
         if key in raw:
             summary[key] = raw[key]
 
@@ -32,24 +35,43 @@ def summarize_player_stats(raw: dict) -> dict:
     return summary or raw  # si no reconocemos la forma, mandamos el raw completo
 
 
-def summarize_match_history(raw: dict, max_matches: int = 10) -> list[dict]:
-    """Extrae un resumen compacto de las últimas partidas."""
-    matches = raw.get("matches") or raw.get("match_history") or raw.get("data") or []
-    summary = []
+def summarize_match_history(raw, max_matches: int = 10) -> list[dict]:
+    """Extrae un resumen compacto de las últimas partidas.
 
+    mrapi.org puede devolver una lista directa de partidas, o un dict que
+    envuelve la lista bajo alguna llave (match_history, matches, data...).
+    Manejamos ambos casos para no quebrarnos si cambia el formato.
+    """
+    if isinstance(raw, list):
+        matches = raw
+    elif isinstance(raw, dict):
+        matches = (
+            raw.get("match_history")
+            or raw.get("matches")
+            or raw.get("data")
+            or []
+        )
+    else:
+        matches = []
+
+    summary = []
     for match in matches[:max_matches]:
+        # Algunos formatos anidan las stats del jugador bajo 'match_player'
+        player_data = match.get("match_player", match)
+        hero_data = player_data.get("player_hero", {})
+
         summary.append(
             {
-                "match_uid": match.get("match_uid"),
-                "game_mode": match.get("game_mode"),
-                "hero": match.get("hero_name") or match.get("cur_hero_id"),
-                "result": "win" if match.get("is_win") else "loss",
-                "kills": match.get("kills"),
-                "deaths": match.get("deaths"),
-                "assists": match.get("assists"),
-                "damage": match.get("total_hero_damage"),
-                "healing": match.get("total_hero_heal"),
-                "damage_taken": match.get("total_damage_taken"),
+                "match_uid": match.get("match_uid") or match.get("id"),
+                "game_mode": match.get("game_mode_id") or match.get("game_mode"),
+                "hero": hero_data.get("hero_name") or player_data.get("hero_name"),
+                "result": "win" if player_data.get("is_win") else "loss",
+                "kills": player_data.get("kills"),
+                "deaths": player_data.get("deaths"),
+                "assists": player_data.get("assists"),
+                "damage": hero_data.get("total_hero_damage"),
+                "healing": hero_data.get("total_hero_heal"),
+                "damage_taken": hero_data.get("total_damage_taken"),
             }
         )
 
