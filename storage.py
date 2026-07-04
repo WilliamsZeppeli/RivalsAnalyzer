@@ -1,9 +1,13 @@
 """
-Guarda en un archivo JSON local la relación discord_user_id -> cuenta de Marvel Rivals
-(nombre + uid) para que la gente no tenga que escribir su nombre cada vez.
+Guarda en un archivo JSON local qué nombre de usuario de Marvel Rivals
+corresponde a cada usuario de Discord (usado por /link, /unlink y /stats).
 
-Para producción real con muchos usuarios, cambia esto por una base de datos
-(SQLite, Postgres, etc.), pero para un bot personal/de servidor chico esto basta.
+NOTA sobre despliegues en Railway/Fly.io: el sistema de archivos de estos
+hosts suele ser efímero — si no agregas un "Volume" persistente, este
+archivo se puede borrar en cada redeploy. Para un bot personal/de un solo
+servidor esto no suele ser grave (basta con volver a hacer /link), pero si
+te importa que sobreviva a redeploys, agrega un volumen persistente y monta
+esta carpeta ahí.
 """
 
 import json
@@ -25,14 +29,13 @@ def _save(data: dict) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def link_account(discord_id: int, marvel_username: str, marvel_uid: str) -> None:
+def link_account(discord_id: int, marvel_username: str) -> None:
     data = _load()
-    data[str(discord_id)] = {"username": marvel_username, "uid": marvel_uid}
+    data[str(discord_id)] = marvel_username
     _save(data)
 
 
-def get_linked_account(discord_id: int) -> dict | None:
-    """Devuelve {'username': ..., 'uid': ...} o None si no hay cuenta vinculada."""
+def get_linked_account(discord_id: int) -> str | None:
     return _load().get(str(discord_id))
 
 

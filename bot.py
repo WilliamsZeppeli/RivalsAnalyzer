@@ -2,13 +2,19 @@
 Bot de Discord: análisis de desempeño en Marvel Rivals.
 
 Comandos:
-  /analizar [texto] [imagen]  -> analiza tus stats generales (rango, héroes, etc.)
-  /partidas [texto] [imagen1] [imagen2] [imagen3]  -> analiza tus últimas partidas
+  /link <usuario>              -> vincula tu nombre de usuario del juego a tu cuenta de Discord
+  /unlink                      -> elimina la vinculación guardada
+  /stats <imagen> [usuario]    -> analiza TU desempeño en una partida (KDA, final hits, curación,
+                                   daño, daño bloqueado) usando la cuenta vinculada o el usuario dado
+  /game <imagen>               -> análisis imparcial de fortalezas/debilidades de TODOS los
+                                   jugadores de la partida, sin enfocarse en nadie en particular
+  /meta                        -> resumen del meta actual de la temporada vigente (con búsqueda web)
+  /tips <hero>                 -> consejos para mejorar con un héroe específico (con búsqueda web)
 
-Puedes pasar texto pegado, una o varias capturas de pantalla, o ambos.
-No depende de ninguna API externa de Marvel Rivals: Gemini lee las capturas
-directamente (es multimodal), así que no hay ningún servicio de terceros
-que se pueda caer y romper el bot.
+No depende de ninguna API externa de Marvel Rivals para leer stats: Gemini lee
+las capturas directamente (es multimodal). /meta y /tips sí usan la
+herramienta de Google Search de Gemini, porque esa información cambia con
+cada parche y no se puede confiar solo en el conocimiento estático del modelo.
 
 Configura las variables de entorno en un archivo .env (ver .env.example):
   DISCORD_BOT_TOKEN
@@ -23,6 +29,7 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 from feedback import FeedbackEngine
+import storage
 
 load_dotenv()
 
@@ -38,121 +45,149 @@ tree = app_commands.CommandTree(client)
 feedback_engine = FeedbackEngine()
 
 
-async def _load_image(attachment: discord.Attachment | None) -> tuple[bytes, str] | None:
-    """Descarga un adjunto de Discord y lo deja listo para mandarlo a Gemini."""
-    if attachment is None:
-        return None
-    if not (attachment.content_type or "").startswith("image/"):
-        raise ValueError(f"El archivo `{attachment.filename}` no parece ser una imagen.")
-    data = await attachment.read()
-    return data, attachment.content_type
+async def _load_images(attachments: list[discord.Attachment]) -> list[tuple[bytes, str]]:
+    """Descarga adjuntos de Discord y los deja listos para mandarlos a Gemini."""
+    images = []
+    for attachment in attachments:
+        if not (attachment.content_type or "").startswith("image/"):
+            raise ValueError(f"El archivo `{attachment.filename}` no parece ser una imagen.")
+        data = await attachment.read()
+        images.append((data, attachment.content_type))
+    return images
 
 
-@tree.command(name="analizar", description="Analiza tus stats generales de Marvel Rivals (texto y/o captura)")
+# ---------- /link y /unlink ----------
+
+@tree.command(name="link", description="Vincula tu cuenta de Discord con tu nombre de usuario de Marvel Rivals")
+@app_commands.describe(usuario="Tu nombre de usuario exacto en Marvel Rivals")
+async def link(interaction: discord.Interaction, usuario: str):
+    storage.link_account(interaction.user.id, usuario.strip())
+    await interaction.response.send_message(
+        f"✅ Cuenta vinculada. A partir de ahora `/stats` usará **{usuario}** por defecto "
+        "para saber en cuál jugador enfocarse.",
+        ephemeral=True,
+    )
+
+
+@tree.command(name="unlink", description="Elimina la vinculación de tu cuenta de Marvel Rivals")
+async def unlink(interaction: discord.Interaction):
+    storage.unlink_account(interaction.user.id)
+    await interaction.response.send_message("🗑️ Vinculación eliminada.", ephemeral=True)
+
+
+# ---------- /stats: veredicto de tu desempeño en una partida ----------
+
+@tree.command(name="stats", description="Analiza tu desempeño en una partida (KDA, final hits, curación, daño, etc.)")
 @app_commands.describe(
-    texto="Pega aquí tus stats como texto (opcional si subes una imagen)",
-    imagen="Captura de pantalla de tu menú de stats (opcional si pegas texto)",
+    imagen="Captura del marcador final de la partida",
+    usuario="Tu nombre de usuario en el juego (opcional si ya usaste /link)",
 )
-async def analizar(
-    interaction: discord.Interaction,
-    texto: str | None = None,
-    imagen: discord.Attachment | None = None,
-):
+async def stats(interaction: discord.Interaction, imagen: discord.Attachment, usuario: str | None = None):
     await interaction.response.defer(thinking=True)
 
-    if not texto and not imagen:
+    player_name = usuario or storage.get_linked_account(interaction.user.id)
+    if not player_name:
         await interaction.followup.send(
-            "Necesito al menos un `texto` con tus stats o una `imagen` (captura de pantalla) para analizar."
+            "No tengo un usuario vinculado. Usa `/stats imagen:<captura> usuario:<tu_nombre>` "
+            "o vincula tu cuenta primero con `/link`."
         )
         return
 
-    images = []
     try:
-        loaded = await _load_image(imagen)
-        if loaded:
-            images.append(loaded)
+        images = await _load_images([imagen])
     except ValueError as e:
         await interaction.followup.send(f"⚠️ {e}")
         return
 
     try:
-        analysis = feedback_engine.generate(
-            instruction=(
-                "Analiza las siguientes estadísticas generales de Marvel Rivals "
-                "(rango, héroes jugados, KDA, daño, healing, etc.) del usuario."
-            ),
-            text=texto,
-            images=images,
-        )
+        verdict = feedback_engine.generate_match_verdict(player_name, images)
     except Exception:
-        logger.exception("Error generando retroalimentación con Gemini")
+        logger.exception("Error generando veredicto con Gemini")
         await interaction.followup.send("⚠️ Ocurrió un error generando el análisis con IA. Intenta de nuevo.")
         return
 
     embed = discord.Embed(
-        title="📊 Análisis de tus stats",
-        description=analysis,
+        title=f"📊 Veredicto de {player_name}",
+        description=verdict,
         color=discord.Color.red(),
     )
     embed.set_footer(text="Análisis generado con Gemini")
-    if imagen:
-        embed.set_thumbnail(url=imagen.url)
+    embed.set_thumbnail(url=imagen.url)
     await interaction.followup.send(embed=embed)
 
 
-@tree.command(name="partidas", description="Analiza tus últimas partidas de Marvel Rivals (texto y/o capturas)")
-@app_commands.describe(
-    texto="Pega aquí el resumen de tus últimas partidas como texto (opcional)",
-    imagen1="Captura de pantalla de una partida (opcional)",
-    imagen2="Otra captura de pantalla (opcional)",
-    imagen3="Otra captura de pantalla más (opcional)",
-)
-async def partidas(
-    interaction: discord.Interaction,
-    texto: str | None = None,
-    imagen1: discord.Attachment | None = None,
-    imagen2: discord.Attachment | None = None,
-    imagen3: discord.Attachment | None = None,
-):
+# ---------- /game: análisis imparcial de todos los jugadores ----------
+
+@tree.command(name="game", description="Análisis imparcial de fortalezas/debilidades de todos los jugadores de la partida")
+@app_commands.describe(imagen="Captura del marcador final de la partida")
+async def game(interaction: discord.Interaction, imagen: discord.Attachment):
     await interaction.response.defer(thinking=True)
 
-    adjuntos = [a for a in (imagen1, imagen2, imagen3) if a is not None]
-    if not texto and not adjuntos:
-        await interaction.followup.send(
-            "Necesito al menos un `texto` con tus partidas o una imagen (captura de pantalla) para analizar."
-        )
-        return
-
-    images = []
     try:
-        for attachment in adjuntos:
-            loaded = await _load_image(attachment)
-            if loaded:
-                images.append(loaded)
+        images = await _load_images([imagen])
     except ValueError as e:
         await interaction.followup.send(f"⚠️ {e}")
         return
 
     try:
-        analysis = feedback_engine.generate(
-            instruction=(
-                "Analiza el siguiente historial de partidas recientes de Marvel Rivals del usuario "
-                "(resultado, héroe jugado, kills/deaths/assists, daño, healing, etc. de cada partida)."
-            ),
-            text=texto,
-            images=images,
-        )
+        overview = feedback_engine.generate_game_overview(images)
     except Exception:
-        logger.exception("Error generando retroalimentación con Gemini")
+        logger.exception("Error generando análisis de partida con Gemini")
         await interaction.followup.send("⚠️ Ocurrió un error generando el análisis con IA. Intenta de nuevo.")
         return
 
     embed = discord.Embed(
-        title=f"🎮 Análisis de tus últimas partidas",
-        description=analysis,
+        title="🎮 Análisis imparcial de la partida",
+        description=overview,
         color=discord.Color.blue(),
     )
     embed.set_footer(text="Análisis generado con Gemini")
+    embed.set_thumbnail(url=imagen.url)
+    await interaction.followup.send(embed=embed)
+
+
+# ---------- /meta: meta actual de la temporada ----------
+
+@tree.command(name="meta", description="Resumen del meta actual de Marvel Rivals (héroes fuertes de la temporada)")
+async def meta(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+
+    try:
+        report = feedback_engine.generate_meta_report()
+    except Exception:
+        logger.exception("Error generando reporte de meta con Gemini")
+        await interaction.followup.send("⚠️ Ocurrió un error consultando el meta actual. Intenta de nuevo.")
+        return
+
+    embed = discord.Embed(
+        title="📈 Meta actual de Marvel Rivals",
+        description=report,
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text="Generado con Gemini + Google Search")
+    await interaction.followup.send(embed=embed)
+
+
+# ---------- /tips: consejos para un héroe específico ----------
+
+@tree.command(name="tips", description="Consejos para mejorar jugando a un héroe específico")
+@app_commands.describe(hero="Nombre del héroe (ej. Hela, Luna Snow, Doctor Strange)")
+async def tips(interaction: discord.Interaction, hero: str):
+    await interaction.response.defer(thinking=True)
+
+    try:
+        advice = feedback_engine.generate_hero_tips(hero.strip())
+    except Exception:
+        logger.exception("Error generando tips de héroe con Gemini")
+        await interaction.followup.send("⚠️ Ocurrió un error generando los tips. Intenta de nuevo.")
+        return
+
+    embed = discord.Embed(
+        title=f"💡 Tips para jugar {hero}",
+        description=advice,
+        color=discord.Color.purple(),
+    )
+    embed.set_footer(text="Generado con Gemini + Google Search")
     await interaction.followup.send(embed=embed)
 
 
