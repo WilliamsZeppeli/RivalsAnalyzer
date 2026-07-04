@@ -1,20 +1,34 @@
 # Marvel Rivals Coach Bot 🕸️📊
 
-Bot de Discord que trae tus estadísticas de Marvel Rivals y te da retroalimentación
-de tu desempeño usando IA (Gemini).
+Bot de Discord que analiza tu desempeño en Marvel Rivals usando IA (Gemini).
+Le pegas texto con tus stats y/o le subes una captura de pantalla del juego,
+y te da retroalimentación honesta y específica.
+
+**No depende de ninguna API externa de Marvel Rivals.** Las dos APIs
+comunitarias que probamos antes (marvelrivalsapi.com y mrapi.org) dejaron de
+funcionar en la misma semana — son proyectos no oficiales mantenidos por
+voluntarios, y pueden caerse sin aviso. Para evitar ese punto de falla,
+este bot usa a Gemini directamente como "lector" multimodal: le mandas una
+captura de pantalla de tu menú de stats o de tu historial de partidas, y el
+modelo la interpreta él mismo, sin pasar por ningún tercero.
 
 ## Comandos
 
 | Comando | Qué hace |
 |---|---|
-| `/link usuario:<TuNombre#1234>` | Vincula tu Discord con tu cuenta de Marvel Rivals |
-| `/stats [usuario]` | Stats generales + análisis de IA |
-| `/partidas [usuario] [cantidad]` | Analiza tus últimas N partidas (por defecto 10) |
-| `/unlink` | Borra la vinculación guardada |
+| `/analizar [texto] [imagen]` | Analiza tus stats generales (rango, héroes, KDA, etc.) |
+| `/partidas [texto] [imagen1] [imagen2] [imagen3]` | Analiza tus últimas partidas |
+
+En ambos comandos puedes:
+- Pegar el texto de tus stats (cópialo tal cual del juego o de donde lo tengas), y/o
+- Subir una o varias capturas de pantalla (el menú de stats del juego, o el resumen
+  de la partida al terminarla).
+
+No hace falta usar los dos a la vez — con solo la imagen ya funciona.
 
 ## 1. Requisitos previos
 
-Necesitas 2 credenciales antes de arrancar (la fuente de datos de Marvel Rivals, mrapi.org, no requiere ninguna):
+Solo necesitas 2 credenciales:
 
 ### a) Token del bot de Discord
 1. Ve a https://discord.com/developers/applications → **New Application**.
@@ -26,19 +40,6 @@ Necesitas 2 credenciales antes de arrancar (la fuente de datos de Marvel Rivals,
 ### b) API key de Gemini
 1. Entra a https://aistudio.google.com/apikey con tu cuenta de Google.
 2. Haz clic en **Create API Key** y cópiala.
-
-> ⚠️ La fuente de datos (**mrapi.org**, por LunarAPI) es una API **no oficial**
-> hecha por la comunidad, igual que la anterior que usábamos
-> (marvelrivalsapi.com, que llegó a estar caída ~1 mes). Ninguna API no
-> oficial de este tipo garantiza estar siempre disponible. Si algún día deja
-> de responder: revisa https://github.com/LunarAPI/api-docs o su Discord de
-> soporte, y si hace falta, cambia el cliente en `marvel_api.py` por otra
-> fuente (el resto del bot no necesita tocarse, solo esa capa).
-> Los nombres exactos de los campos en las respuestas también pueden cambiar;
-> si algún comando empieza a fallar o a dar respuestas raras, revisa
-> `stats_utils.py` — ahí es donde se interpretan los campos del JSON, y basta
-> con imprimir la respuesta cruda (`print(json.dumps(raw, indent=2))`) para
-> ver qué cambió y ajustar las llaves.
 
 ## 2. Instalación local
 
@@ -66,11 +67,21 @@ Si todo está bien configurado, verás en la consola:
 Bot conectado como TuBot#1234
 ```
 
-Y los comandos `/link`, `/stats`, `/partidas`, `/unlink` aparecerán en tu servidor
-de Discord (puede tardar hasta una hora en propagarse la primera vez; si no
-aparecen, reinicia Discord).
+Y los comandos `/analizar` y `/partidas` aparecerán en tu servidor de Discord
+(puede tardar hasta una hora en propagarse la primera vez; si no aparecen,
+reinicia Discord).
 
-## 3. Desplegarlo 24/7 (para que no dependa de tu compu)
+## 3. Cómo usarlo
+
+1. Abre Marvel Rivals y ve a tu menú de stats (career/perfil) o al resumen
+   de una partida que acabes de jugar.
+2. Toma una captura de pantalla.
+3. En Discord: `/analizar` y adjunta la imagen en el parámetro `imagen`
+   (o pega el texto si ya tienes tus stats copiadas en algún lado).
+4. Para varias partidas seguidas, usa `/partidas` y puedes subir hasta 3
+   capturas a la vez.
+
+## 4. Desplegarlo 24/7 (para que no dependa de tu compu)
 
 Recomendación: **Railway** (más simple para empezar) o **Fly.io** (más control,
 capa gratuita más generosa). Ambos soportan procesos de Python de larga duración.
@@ -96,25 +107,32 @@ capa gratuita más generosa). Ambos soportan procesos de Python de larga duraci�
 En ambos casos, cuida que el `Procfile`/start command corra `python bot.py` como
 un **worker**, no como servicio web (el bot no necesita recibir peticiones HTTP).
 
-## 4. Estructura del proyecto
+## 5. Estructura del proyecto
 
 ```
 marvel-rivals-bot/
 ├── bot.py            # Bot de Discord y comandos slash
-├── marvel_api.py      # Cliente HTTP para mrapi.org (datos de Marvel Rivals)
-├── feedback.py        # Llama a Gemini para generar el análisis
-├── stats_utils.py      # Recorta/normaliza el JSON antes de mandarlo a Gemini
-├── storage.py          # Vincula discord_id <-> usuario de Marvel Rivals (JSON local)
-├── data/
-│   └── linked_accounts.json   # se crea solo, no lo edites a mano
+├── feedback.py        # Llama a Gemini (texto + imágenes) para generar el análisis
 ├── requirements.txt
 ├── .env.example
 └── README.md
 ```
 
-## 5. Próximos pasos posibles
+## 6. Por qué este diseño y no una API de stats
 
-- Guardar el historial de análisis para mostrar progreso a lo largo del tiempo.
-- Comparar tus stats contra el promedio del rango (mrapi.org tiene endpoints de leaderboard).
-- Agregar gráficas (ej. con `matplotlib`) de tu winrate por héroe.
-- Cambiar `storage.py` por una base de datos real si el bot crece a muchos servidores.
+Marvel Rivals (NetEase) no tiene una API pública oficial. Todo lo que existe
+son proyectos de la comunidad que hacen scraping o ingenieria inversa del
+juego, y en la práctica resultan frágiles: pueden quedar caídos días o
+semanas, cambiar de formato sin aviso, o desaparecer. Si en el futuro quieres
+agregar de todas formas una fuente de datos automática (en vez de pegar
+captura/texto a mano), lo más simple es escribir un cliente HTTP nuevo (como
+los que probamos antes) y conectarlo como una fuente opcional adicional —
+pero el núcleo del bot (leer stats con Gemini) seguiría funcionando aunque
+esa fuente externa se caiga.
+
+## 7. Próximos pasos posibles
+
+- Guardar tus análisis anteriores (con `window.storage` si lo llevas a un
+  artifact, o una base de datos si crece el bot) para comparar tu progreso.
+- Permitir subir más de 3 imágenes por comando si quieres analizar una racha completa.
+- Agregar un modo "comparar dos capturas" (antes/después) para ver tu evolución.

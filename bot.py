@@ -2,32 +2,27 @@
 Bot de Discord: análisis de desempeño en Marvel Rivals.
 
 Comandos:
-  /link <usuario_marvel_rivals>   -> vincula tu cuenta de Discord con tu nombre en Marvel Rivals
-  /stats [usuario_marvel_rivals]  -> muestra tus stats generales + retroalimentación de Gemini
-  /partidas [usuario] [cantidad]  -> analiza tus últimas N partidas
-  /unlink                         -> elimina la vinculación guardada
+  /analizar [texto] [imagen]  -> analiza tus stats generales (rango, héroes, etc.)
+  /partidas [texto] [imagen1] [imagen2] [imagen3]  -> analiza tus últimas partidas
+
+Puedes pasar texto pegado, una o varias capturas de pantalla, o ambos.
+No depende de ninguna API externa de Marvel Rivals: Gemini lee las capturas
+directamente (es multimodal), así que no hay ningún servicio de terceros
+que se pueda caer y romper el bot.
 
 Configura las variables de entorno en un archivo .env (ver .env.example):
   DISCORD_BOT_TOKEN
   GEMINI_API_KEY
-
-Fuente de datos: mrapi.org (API no oficial de Marvel Rivals, sin API key).
-Nota sobre nombres de usuario: buscar por username puede ser menos estable
-que por UID. Por eso este bot resuelve el nombre a un UID numérico primero
-(o usa el UID directo si se lo pasas), y usa ese UID para todo lo demás.
 """
 
-import os
 import logging
+import os
 
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
-from marvel_api import MarvelRivalsClient, MarvelRivalsAPIError
 from feedback import FeedbackEngine
-from stats_utils import summarize_player_stats, summarize_match_history
-import storage
 
 load_dotenv()
 
@@ -40,199 +35,130 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-marvel_client = MarvelRivalsClient()
 feedback_engine = FeedbackEngine()
 
 
-async def resolve_player(discord_id: int, provided: str | None):
-    """
-    Devuelve (nombre_para_mostrar, uid) listo para usar en las llamadas a la API,
-    o (None, None) si no hay nada que usar.
-    Si 'provided' viene, siempre lo resuelve contra find-player (para sacar el UID).
-    Si no viene, usa la cuenta vinculada con /link (que ya trae el UID guardado).
-    """
-    if provided:
-        provided = provided.strip()
-        if provided.isdigit():
-            return provided, provided  # ya es un UID, se usa tal cual
-        result = await marvel_client.find_player_uid(provided)
-        return result.get("name", provided), result.get("uid", provided)
-
-    linked = storage.get_linked_account(discord_id)
-    if linked:
-        return linked["username"], linked["uid"]
-
-    return None, None
+async def _load_image(attachment: discord.Attachment | None) -> tuple[bytes, str] | None:
+    """Descarga un adjunto de Discord y lo deja listo para mandarlo a Gemini."""
+    if attachment is None:
+        return None
+    if not (attachment.content_type or "").startswith("image/"):
+        raise ValueError(f"El archivo `{attachment.filename}` no parece ser una imagen.")
+    data = await attachment.read()
+    return data, attachment.content_type
 
 
-@tree.command(name="link", description="Vincula tu cuenta de Discord con tu usuario o UID de Marvel Rivals")
+@tree.command(name="analizar", description="Analiza tus stats generales de Marvel Rivals (texto y/o captura)")
 @app_commands.describe(
-    usuario="Tu nombre de usuario exacto en Marvel Rivals, o mejor aún tu UID numérico "
-    "(Perfil -> Overview en el juego)"
+    texto="Pega aquí tus stats como texto (opcional si subes una imagen)",
+    imagen="Captura de pantalla de tu menú de stats (opcional si pegas texto)",
 )
-async def link(interaction: discord.Interaction, usuario: str):
-    await interaction.response.defer(thinking=True, ephemeral=True)
-
-    usuario = usuario.strip()
-
-    try:
-        if usuario.isdigit():
-            # Nos pasaron el UID directo: lo usamos tal cual y confirmamos que existe
-            # pidiendo sus stats (que sí resuelve bien por UID).
-            raw_stats = await marvel_client.get_player_stats(usuario)
-            name = (
-                raw_stats.get("name")
-                or raw_stats.get("player_name")
-                or raw_stats.get("player", {}).get("name")
-                or usuario
-            )
-            uid = usuario
-        else:
-            result = await marvel_client.find_player_uid(usuario)
-            name = result.get("name", usuario)
-            uid = result.get("uid")
-    except MarvelRivalsAPIError as e:
-        await interaction.followup.send(f"⚠️ {e}", ephemeral=True)
-        return
-    except Exception:
-        logger.exception("Error inesperado buscando jugador en /link")
-        await interaction.followup.send("⚠️ Ocurrió un error inesperado consultando la API de Marvel Rivals.", ephemeral=True)
-        return
-
-    if not uid:
-        await interaction.followup.send(
-            "⚠️ Encontré una respuesta pero sin UID. Intenta de nuevo o revisa el nombre/UID exacto.",
-            ephemeral=True,
-        )
-        return
-
-    storage.link_account(interaction.user.id, name, uid)
-    await interaction.followup.send(
-        f"✅ Cuenta vinculada. A partir de ahora `/stats` y `/partidas` usarán **{name}** por defecto.",
-        ephemeral=True,
-    )
-
-
-@tree.command(name="unlink", description="Elimina la vinculación de tu cuenta de Marvel Rivals")
-async def unlink(interaction: discord.Interaction):
-    storage.unlink_account(interaction.user.id)
-    await interaction.response.send_message("🗑️ Vinculación eliminada.", ephemeral=True)
-
-
-@tree.command(name="stats", description="Muestra tus stats de Marvel Rivals y retroalimentación de IA")
-@app_commands.describe(usuario="Nombre de usuario en Marvel Rivals (opcional si ya usaste /link)")
-async def stats(interaction: discord.Interaction, usuario: str | None = None):
+async def analizar(
+    interaction: discord.Interaction,
+    texto: str | None = None,
+    imagen: discord.Attachment | None = None,
+):
     await interaction.response.defer(thinking=True)
 
-    try:
-        name, uid = await resolve_player(interaction.user.id, usuario)
-    except MarvelRivalsAPIError as e:
-        await interaction.followup.send(f"⚠️ {e}")
-        return
-
-    if not uid:
+    if not texto and not imagen:
         await interaction.followup.send(
-            "No tengo un usuario vinculado. Usa `/stats usuario:<tu_nombre>` "
-            "o vincula tu cuenta primero con `/link`."
+            "Necesito al menos un `texto` con tus stats o una `imagen` (captura de pantalla) para analizar."
         )
         return
 
+    images = []
     try:
-        raw_stats = await marvel_client.get_player_stats(uid)
-    except MarvelRivalsAPIError as e:
+        loaded = await _load_image(imagen)
+        if loaded:
+            images.append(loaded)
+    except ValueError as e:
         await interaction.followup.send(f"⚠️ {e}")
         return
-    except Exception:
-        logger.exception("Error inesperado consultando stats")
-        await interaction.followup.send("⚠️ Ocurrió un error inesperado consultando la API de Marvel Rivals.")
-        return
-
-    summary = summarize_player_stats(raw_stats)
 
     try:
-        analysis = feedback_engine.generate(name, summary)
+        analysis = feedback_engine.generate(
+            instruction=(
+                "Analiza las siguientes estadísticas generales de Marvel Rivals "
+                "(rango, héroes jugados, KDA, daño, healing, etc.) del usuario."
+            ),
+            text=texto,
+            images=images,
+        )
     except Exception:
         logger.exception("Error generando retroalimentación con Gemini")
-        await interaction.followup.send("⚠️ Obtuve tus stats pero fallé al generar el análisis con IA.")
+        await interaction.followup.send("⚠️ Ocurrió un error generando el análisis con IA. Intenta de nuevo.")
         return
 
     embed = discord.Embed(
-        title=f"📊 Stats de {name}",
+        title="📊 Análisis de tus stats",
         description=analysis,
         color=discord.Color.red(),
     )
-    embed.set_footer(text="Datos vía MarvelRivalsAPI.com · Análisis generado con Gemini")
+    embed.set_footer(text="Análisis generado con Gemini")
+    if imagen:
+        embed.set_thumbnail(url=imagen.url)
     await interaction.followup.send(embed=embed)
 
 
-@tree.command(name="partidas", description="Analiza tus últimas partidas de Marvel Rivals")
+@tree.command(name="partidas", description="Analiza tus últimas partidas de Marvel Rivals (texto y/o capturas)")
 @app_commands.describe(
-    usuario="Nombre de usuario en Marvel Rivals (opcional si ya usaste /link)",
-    cantidad="Cuántas partidas recientes analizar (por defecto 10, máx 20)",
+    texto="Pega aquí el resumen de tus últimas partidas como texto (opcional)",
+    imagen1="Captura de pantalla de una partida (opcional)",
+    imagen2="Otra captura de pantalla (opcional)",
+    imagen3="Otra captura de pantalla más (opcional)",
 )
-async def partidas(interaction: discord.Interaction, usuario: str | None = None, cantidad: int = 10):
+async def partidas(
+    interaction: discord.Interaction,
+    texto: str | None = None,
+    imagen1: discord.Attachment | None = None,
+    imagen2: discord.Attachment | None = None,
+    imagen3: discord.Attachment | None = None,
+):
     await interaction.response.defer(thinking=True)
 
-    try:
-        name, uid = await resolve_player(interaction.user.id, usuario)
-    except MarvelRivalsAPIError as e:
-        await interaction.followup.send(f"⚠️ {e}")
-        return
-
-    if not uid:
+    adjuntos = [a for a in (imagen1, imagen2, imagen3) if a is not None]
+    if not texto and not adjuntos:
         await interaction.followup.send(
-            "No tengo un usuario vinculado. Usa `/partidas usuario:<tu_nombre>` "
-            "o vincula tu cuenta primero con `/link`."
+            "Necesito al menos un `texto` con tus partidas o una imagen (captura de pantalla) para analizar."
         )
         return
 
-    cantidad = max(1, min(cantidad, 20))
-
+    images = []
     try:
-        raw_history = await marvel_client.get_match_history(uid, page=1)
-    except MarvelRivalsAPIError as e:
+        for attachment in adjuntos:
+            loaded = await _load_image(attachment)
+            if loaded:
+                images.append(loaded)
+    except ValueError as e:
         await interaction.followup.send(f"⚠️ {e}")
         return
-    except Exception:
-        logger.exception("Error inesperado consultando historial")
-        await interaction.followup.send("⚠️ Ocurrió un error inesperado consultando la API de Marvel Rivals.")
-        return
-
-    matches = summarize_match_history(raw_history, max_matches=cantidad)
-    if not matches:
-        await interaction.followup.send("No encontré partidas recientes para ese usuario.")
-        return
 
     try:
-        analysis = feedback_engine.generate(name, {"recent_matches": matches})
+        analysis = feedback_engine.generate(
+            instruction=(
+                "Analiza el siguiente historial de partidas recientes de Marvel Rivals del usuario "
+                "(resultado, héroe jugado, kills/deaths/assists, daño, healing, etc. de cada partida)."
+            ),
+            text=texto,
+            images=images,
+        )
     except Exception:
         logger.exception("Error generando retroalimentación con Gemini")
-        await interaction.followup.send("⚠️ Obtuve tu historial pero fallé al generar el análisis con IA.")
+        await interaction.followup.send("⚠️ Ocurrió un error generando el análisis con IA. Intenta de nuevo.")
         return
 
     embed = discord.Embed(
-        title=f"🎮 Últimas {len(matches)} partidas de {name}",
+        title=f"🎮 Análisis de tus últimas partidas",
         description=analysis,
         color=discord.Color.blue(),
     )
-    embed.set_footer(text="Datos vía MarvelRivalsAPI.com · Análisis generado con Gemini")
+    embed.set_footer(text="Análisis generado con Gemini")
     await interaction.followup.send(embed=embed)
 
 
 @client.event
 async def on_ready():
-    # Sync global (tarda en propagarse, hasta ~1 hora, pero llega a todos los servidores)
     await tree.sync()
-
-    # Si defines DEV_GUILD_ID en tu .env, además sincroniza ahí de forma INSTANTÁNEA.
-    # Útil mientras pruebas cambios en los comandos. Quítalo cuando ya no lo necesites.
-    dev_guild_id = os.getenv("DEV_GUILD_ID")
-    if dev_guild_id:
-        guild = discord.Object(id=int(dev_guild_id))
-        tree.copy_global_to(guild=guild)
-        await tree.sync(guild=guild)
-        logger.info(f"Comandos sincronizados al instante en el servidor {dev_guild_id}")
-
     logger.info(f"Bot conectado como {client.user}")
 
 
