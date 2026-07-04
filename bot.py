@@ -53,6 +53,9 @@ async def resolve_player(discord_id: int, provided: str | None):
     Si no viene, usa la cuenta vinculada con /link (que ya trae el UID guardado).
     """
     if provided:
+        provided = provided.strip()
+        if provided.isdigit():
+            return provided, provided  # ya es un UID, se usa tal cual
         result = await marvel_client.find_player_uid(provided)
         return result.get("name", provided), result.get("uid", provided)
 
@@ -63,13 +66,31 @@ async def resolve_player(discord_id: int, provided: str | None):
     return None, None
 
 
-@tree.command(name="link", description="Vincula tu cuenta de Discord con tu usuario de Marvel Rivals")
-@app_commands.describe(usuario="Tu nombre de usuario exacto en Marvel Rivals")
+@tree.command(name="link", description="Vincula tu cuenta de Discord con tu usuario o UID de Marvel Rivals")
+@app_commands.describe(
+    usuario="Tu nombre de usuario exacto en Marvel Rivals, o mejor aún tu UID numérico "
+    "(Perfil -> Overview en el juego)"
+)
 async def link(interaction: discord.Interaction, usuario: str):
     await interaction.response.defer(thinking=True, ephemeral=True)
 
+    usuario = usuario.strip()
+
     try:
-        result = await marvel_client.find_player_uid(usuario)
+        if usuario.isdigit():
+            # Nos pasaron el UID directo: lo usamos tal cual y confirmamos que existe
+            # pidiendo sus stats (que sí resuelve bien por UID).
+            raw_stats = await marvel_client.get_player_stats(usuario)
+            name = (
+                raw_stats.get("name")
+                or raw_stats.get("player", {}).get("name")
+                or usuario
+            )
+            uid = usuario
+        else:
+            result = await marvel_client.find_player_uid(usuario)
+            name = result.get("name", usuario)
+            uid = result.get("uid")
     except MarvelRivalsAPIError as e:
         await interaction.followup.send(f"⚠️ {e}", ephemeral=True)
         return
@@ -78,11 +99,9 @@ async def link(interaction: discord.Interaction, usuario: str):
         await interaction.followup.send("⚠️ Ocurrió un error inesperado consultando la API de Marvel Rivals.", ephemeral=True)
         return
 
-    name = result.get("name", usuario)
-    uid = result.get("uid")
     if not uid:
         await interaction.followup.send(
-            "⚠️ Encontré una respuesta pero sin UID. Intenta de nuevo o revisa el nombre exacto.",
+            "⚠️ Encontré una respuesta pero sin UID. Intenta de nuevo o revisa el nombre/UID exacto.",
             ephemeral=True,
         )
         return
@@ -202,7 +221,18 @@ async def partidas(interaction: discord.Interaction, usuario: str | None = None,
 
 @client.event
 async def on_ready():
+    # Sync global (tarda en propagarse, hasta ~1 hora, pero llega a todos los servidores)
     await tree.sync()
+
+    # Si defines DEV_GUILD_ID en tu .env, además sincroniza ahí de forma INSTANTÁNEA.
+    # Útil mientras pruebas cambios en los comandos. Quítalo cuando ya no lo necesites.
+    dev_guild_id = os.getenv("DEV_GUILD_ID")
+    if dev_guild_id:
+        guild = discord.Object(id=int(dev_guild_id))
+        tree.copy_global_to(guild=guild)
+        await tree.sync(guild=guild)
+        logger.info(f"Comandos sincronizados al instante en el servidor {dev_guild_id}")
+
     logger.info(f"Bot conectado como {client.user}")
 
 
