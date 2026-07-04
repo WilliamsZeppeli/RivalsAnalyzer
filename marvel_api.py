@@ -32,8 +32,8 @@ class MarvelRivalsClient:
             async with session.get(url, headers=self._headers(), params=params) as resp:
                 if resp.status == 404:
                     raise MarvelRivalsAPIError(
-                        "No encontré a ese jugador. Revisa que el nombre o ID esté bien escrito "
-                        "(recuerda que en Marvel Rivals el nombre incluye el '#0000')."
+                        "No encontré a ese jugador. Revisa que el nombre de usuario esté "
+                        "escrito exactamente igual que en el juego (mayúsculas/minúsculas incluidas)."
                     )
                 if resp.status == 401:
                     raise MarvelRivalsAPIError(

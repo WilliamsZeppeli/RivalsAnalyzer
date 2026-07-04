@@ -11,6 +11,11 @@ Configura las variables de entorno en un archivo .env (ver .env.example):
   DISCORD_BOT_TOKEN
   MARVEL_RIVALS_API_KEY
   GEMINI_API_KEY
+
+Nota sobre nombres de usuario: la propia documentación de MarvelRivalsAPI.com
+advierte que buscar stats/historial directamente por username no siempre es
+confiable. Por eso este bot primero resuelve el nombre a un UID con el
+endpoint find-player, y usa ese UID para todo lo demás.
 """
 
 import os
@@ -40,19 +45,51 @@ marvel_client = MarvelRivalsClient()
 feedback_engine = FeedbackEngine()
 
 
-def resolve_username(discord_id: int, provided: str | None) -> str | None:
-    """Si el usuario no pasó un nombre, intenta usar el vinculado con /link."""
+async def resolve_player(discord_id: int, provided: str | None):
+    """
+    Devuelve (nombre_para_mostrar, uid) listo para usar en las llamadas a la API,
+    o (None, None) si no hay nada que usar.
+    Si 'provided' viene, siempre lo resuelve contra find-player (para sacar el UID).
+    Si no viene, usa la cuenta vinculada con /link (que ya trae el UID guardado).
+    """
     if provided:
-        return provided
-    return storage.get_linked_account(discord_id)
+        result = await marvel_client.find_player_uid(provided)
+        return result.get("name", provided), result.get("uid", provided)
+
+    linked = storage.get_linked_account(discord_id)
+    if linked:
+        return linked["username"], linked["uid"]
+
+    return None, None
 
 
 @tree.command(name="link", description="Vincula tu cuenta de Discord con tu usuario de Marvel Rivals")
-@app_commands.describe(usuario="Tu nombre de usuario en Marvel Rivals, ej: Sypeh#1234")
+@app_commands.describe(usuario="Tu nombre de usuario exacto en Marvel Rivals")
 async def link(interaction: discord.Interaction, usuario: str):
-    storage.link_account(interaction.user.id, usuario)
-    await interaction.response.send_message(
-        f"✅ Cuenta vinculada. A partir de ahora `/stats` y `/partidas` usarán **{usuario}** por defecto.",
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    try:
+        result = await marvel_client.find_player_uid(usuario)
+    except MarvelRivalsAPIError as e:
+        await interaction.followup.send(f"⚠️ {e}", ephemeral=True)
+        return
+    except Exception:
+        logger.exception("Error inesperado buscando jugador en /link")
+        await interaction.followup.send("⚠️ Ocurrió un error inesperado consultando la API de Marvel Rivals.", ephemeral=True)
+        return
+
+    name = result.get("name", usuario)
+    uid = result.get("uid")
+    if not uid:
+        await interaction.followup.send(
+            "⚠️ Encontré una respuesta pero sin UID. Intenta de nuevo o revisa el nombre exacto.",
+            ephemeral=True,
+        )
+        return
+
+    storage.link_account(interaction.user.id, name, uid)
+    await interaction.followup.send(
+        f"✅ Cuenta vinculada. A partir de ahora `/stats` y `/partidas` usarán **{name}** por defecto.",
         ephemeral=True,
     )
 
@@ -64,20 +101,25 @@ async def unlink(interaction: discord.Interaction):
 
 
 @tree.command(name="stats", description="Muestra tus stats de Marvel Rivals y retroalimentación de IA")
-@app_commands.describe(usuario="Nombre de usuario o ID en Marvel Rivals (opcional si ya usaste /link)")
+@app_commands.describe(usuario="Nombre de usuario en Marvel Rivals (opcional si ya usaste /link)")
 async def stats(interaction: discord.Interaction, usuario: str | None = None):
     await interaction.response.defer(thinking=True)
 
-    target = resolve_username(interaction.user.id, usuario)
-    if not target:
+    try:
+        name, uid = await resolve_player(interaction.user.id, usuario)
+    except MarvelRivalsAPIError as e:
+        await interaction.followup.send(f"⚠️ {e}")
+        return
+
+    if not uid:
         await interaction.followup.send(
-            "No tengo un usuario vinculado. Usa `/stats usuario:<tu_id_o_nombre>` "
+            "No tengo un usuario vinculado. Usa `/stats usuario:<tu_nombre>` "
             "o vincula tu cuenta primero con `/link`."
         )
         return
 
     try:
-        raw_stats = await marvel_client.get_player_stats(target)
+        raw_stats = await marvel_client.get_player_stats(uid)
     except MarvelRivalsAPIError as e:
         await interaction.followup.send(f"⚠️ {e}")
         return
@@ -89,14 +131,14 @@ async def stats(interaction: discord.Interaction, usuario: str | None = None):
     summary = summarize_player_stats(raw_stats)
 
     try:
-        analysis = feedback_engine.generate(target, summary)
+        analysis = feedback_engine.generate(name, summary)
     except Exception:
         logger.exception("Error generando retroalimentación con Gemini")
         await interaction.followup.send("⚠️ Obtuve tus stats pero fallé al generar el análisis con IA.")
         return
 
     embed = discord.Embed(
-        title=f"📊 Stats de {target}",
+        title=f"📊 Stats de {name}",
         description=analysis,
         color=discord.Color.red(),
     )
@@ -106,16 +148,21 @@ async def stats(interaction: discord.Interaction, usuario: str | None = None):
 
 @tree.command(name="partidas", description="Analiza tus últimas partidas de Marvel Rivals")
 @app_commands.describe(
-    usuario="Nombre de usuario o ID en Marvel Rivals (opcional si ya usaste /link)",
+    usuario="Nombre de usuario en Marvel Rivals (opcional si ya usaste /link)",
     cantidad="Cuántas partidas recientes analizar (por defecto 10, máx 20)",
 )
 async def partidas(interaction: discord.Interaction, usuario: str | None = None, cantidad: int = 10):
     await interaction.response.defer(thinking=True)
 
-    target = resolve_username(interaction.user.id, usuario)
-    if not target:
+    try:
+        name, uid = await resolve_player(interaction.user.id, usuario)
+    except MarvelRivalsAPIError as e:
+        await interaction.followup.send(f"⚠️ {e}")
+        return
+
+    if not uid:
         await interaction.followup.send(
-            "No tengo un usuario vinculado. Usa `/partidas usuario:<tu_id_o_nombre>` "
+            "No tengo un usuario vinculado. Usa `/partidas usuario:<tu_nombre>` "
             "o vincula tu cuenta primero con `/link`."
         )
         return
@@ -123,7 +170,7 @@ async def partidas(interaction: discord.Interaction, usuario: str | None = None,
     cantidad = max(1, min(cantidad, 20))
 
     try:
-        raw_history = await marvel_client.get_match_history(target, limit=cantidad)
+        raw_history = await marvel_client.get_match_history(uid, limit=cantidad)
     except MarvelRivalsAPIError as e:
         await interaction.followup.send(f"⚠️ {e}")
         return
@@ -138,14 +185,14 @@ async def partidas(interaction: discord.Interaction, usuario: str | None = None,
         return
 
     try:
-        analysis = feedback_engine.generate(target, {"recent_matches": matches})
+        analysis = feedback_engine.generate(name, {"recent_matches": matches})
     except Exception:
         logger.exception("Error generando retroalimentación con Gemini")
         await interaction.followup.send("⚠️ Obtuve tu historial pero fallé al generar el análisis con IA.")
         return
 
     embed = discord.Embed(
-        title=f"🎮 Últimas {len(matches)} partidas de {target}",
+        title=f"🎮 Últimas {len(matches)} partidas de {name}",
         description=analysis,
         color=discord.Color.blue(),
     )

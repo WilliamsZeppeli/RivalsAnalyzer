@@ -1,13 +1,12 @@
 """
-Guarda en un archivo JSON local la relación discord_user_id -> marvel_rivals_username
-para que la gente no tenga que escribir su ID cada vez.
+Guarda en un archivo JSON local la relación discord_user_id -> cuenta de Marvel Rivals
+(nombre + uid) para que la gente no tenga que escribir su nombre cada vez.
 
 Para producción real con muchos usuarios, cambia esto por una base de datos
 (SQLite, Postgres, etc.), pero para un bot personal/de servidor chico esto basta.
 """
 
 import json
-import os
 from pathlib import Path
 
 DATA_FILE = Path(__file__).parent / "data" / "linked_accounts.json"
@@ -26,13 +25,14 @@ def _save(data: dict) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def link_account(discord_id: int, marvel_username: str) -> None:
+def link_account(discord_id: int, marvel_username: str, marvel_uid: str) -> None:
     data = _load()
-    data[str(discord_id)] = marvel_username
+    data[str(discord_id)] = {"username": marvel_username, "uid": marvel_uid}
     _save(data)
 
 
-def get_linked_account(discord_id: int) -> str | None:
+def get_linked_account(discord_id: int) -> dict | None:
+    """Devuelve {'username': ..., 'uid': ...} o None si no hay cuenta vinculada."""
     return _load().get(str(discord_id))
 
 
