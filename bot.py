@@ -101,6 +101,9 @@ async def stats(interaction: discord.Interaction, imagen: discord.Attachment, us
 
     try:
         verdict = feedback_engine.generate_match_verdict(player_name, images)
+    except RuntimeError as e:
+        await interaction.followup.send(f"⚠️ {e}")
+        return
     except Exception:
         logger.exception("Error generando veredicto con Gemini")
         await interaction.followup.send("⚠️ Ocurrió un error generando el análisis con IA. Intenta de nuevo.")
@@ -131,6 +134,9 @@ async def game(interaction: discord.Interaction, imagen: discord.Attachment):
 
     try:
         overview = feedback_engine.generate_game_overview(images)
+    except RuntimeError as e:
+        await interaction.followup.send(f"⚠️ {e}")
+        return
     except Exception:
         logger.exception("Error generando análisis de partida con Gemini")
         await interaction.followup.send("⚠️ Ocurrió un error generando el análisis con IA. Intenta de nuevo.")
@@ -154,6 +160,9 @@ async def meta(interaction: discord.Interaction):
 
     try:
         report = feedback_engine.generate_meta_report()
+    except RuntimeError as e:
+        await interaction.followup.send(f"⚠️ {e}")
+        return
     except Exception:
         logger.exception("Error generando reporte de meta con Gemini")
         await interaction.followup.send("⚠️ Ocurrió un error consultando el meta actual. Intenta de nuevo.")
@@ -177,6 +186,9 @@ async def tips(interaction: discord.Interaction, hero: str):
 
     try:
         advice = feedback_engine.generate_hero_tips(hero.strip())
+    except RuntimeError as e:
+        await interaction.followup.send(f"⚠️ {e}")
+        return
     except Exception:
         logger.exception("Error generando tips de héroe con Gemini")
         await interaction.followup.send("⚠️ Ocurrió un error generando los tips. Intenta de nuevo.")

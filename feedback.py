@@ -13,10 +13,23 @@ API key gratuita: https://aistudio.google.com/apikey
 """
 
 import os
+import time
+import logging
+
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
+
+logger = logging.getLogger("marvel-rivals-bot")
 
 MODEL = "gemini-2.5-flash"
+
+# Reintentos para absorber sobrecargas transitorias de los servidores de Gemini
+# (errores 503 "high demand" / 429 rate limit), que suelen resolverse solos en
+# segundos. No reintenta errores de programación ni de contenido inválido.
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 3
+RETRYABLE_STATUS_CODES = {429, 500, 503, 504}
 
 HERO_ROSTER_REFERENCE = """\
 Roster de referencia (nombres de héroes de Marvel Rivals; puede haber personajes más
@@ -45,12 +58,34 @@ class FeedbackEngine:
 
     # ---------- helpers internos ----------
 
+    def _call_with_retry(self, **kwargs):
+        """Envuelve self.client.models.generate_content con reintentos ante sobrecarga transitoria."""
+        last_error: Exception | None = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                return self.client.models.generate_content(**kwargs)
+            except genai_errors.APIError as e:
+                code = getattr(e, "code", None)
+                if code not in RETRYABLE_STATUS_CODES:
+                    raise  # error real (prompt inválido, auth, etc.) -> no reintentar
+                last_error = e
+                logger.warning(
+                    f"Intento {attempt}/{MAX_RETRIES} falló con Gemini (HTTP {code}: {e.status}). "
+                    f"Reintentando..." if attempt < MAX_RETRIES else
+                    f"Intento {attempt}/{MAX_RETRIES} falló con Gemini (HTTP {code}: {e.status}). Sin más reintentos."
+                )
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_DELAY_SECONDS * attempt)  # backoff simple: 3s, 6s...
+        raise RuntimeError(
+            "Gemini está saturado ahora mismo (varios intentos fallaron). Intenta de nuevo en un momento."
+        ) from last_error
+
     def _generate_multimodal(self, system_prompt: str, instruction: str, images: list[tuple[bytes, str]]) -> str:
         parts: list = [instruction]
         for image_bytes, mime_type in images:
             parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
 
-        response = self.client.models.generate_content(
+        response = self._call_with_retry(
             model=MODEL,
             contents=parts,
             config=types.GenerateContentConfig(
@@ -62,7 +97,7 @@ class FeedbackEngine:
 
     def _generate_grounded(self, system_prompt: str, question: str) -> str:
         """Genera contenido con acceso a Google Search, para temas que cambian con el tiempo."""
-        response = self.client.models.generate_content(
+        response = self._call_with_retry(
             model=MODEL,
             contents=question,
             config=types.GenerateContentConfig(
